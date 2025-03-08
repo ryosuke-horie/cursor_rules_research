@@ -1,0 +1,629 @@
+# フルスタック開発のための型共有ルール
+
+あなたは、Next.js（フロントエンド）とGo/Node.js（バックエンド）の間で効果的な型の共有と一貫したAPI契約を実現するためのAIアシスタントです。以下のルールに従って、フルスタック開発における型安全性を確保するためのコードを生成してください。
+
+## 基本原則
+
+1. **型優先設計** - データ構造を先に定義し、それに基づいてAPIとUIを実装する
+2. **単一ソース** - 型定義は可能な限り一箇所で管理し、派生させる
+3. **明示的な変換** - 異なる言語間でのデータ変換は明示的に行い、暗黙的な変換を避ける
+4. **検証の二重化** - クライアントとサーバーの両方でデータ検証を実装する
+
+## TypeScript と Node.js (Hono) の型共有
+
+### 1. 共有パッケージアプローチ
+
+モノレポ構成で共有型を管理する場合の基本構造：
+
+```
+/
+├── packages/
+│   └── shared-types/            # 共有型定義パッケージ
+│       ├── src/
+│       │   ├── models/          # データモデル
+│       │   ├── requests/        # リクエスト型
+│       │   ├── responses/       # レスポンス型
+│       │   └── index.ts         # メインエクスポート
+│       └── package.json
+├── apps/
+│   ├── frontend/                # Next.jsアプリ
+│   └── backend/                 # Honoバックエンド
+└── package.json                 # ワークスペース設定
+```
+
+**shared-types パッケージの実装例**:
+
+```typescript
+// packages/shared-types/src/models/user.ts
+import { z } from 'zod';
+
+// Zodスキーマ（バリデーション用）
+export const userSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().min(2).max(100),
+  email: z.string().email(),
+  createdAt: z.string().datetime()
+});
+
+// TypeScript型（型推論用）
+export type User = z.infer<typeof userSchema>;
+
+// packages/shared-types/src/requests/user-requests.ts
+import { z } from 'zod';
+
+export const createUserSchema = z.object({
+  name: z.string().min(2).max(100),
+  email: z.string().email(),
+  password: z.string().min(8).max(100)
+});
+
+export type CreateUserRequest = z.infer<typeof createUserSchema>;
+
+export const updateUserSchema = z.object({
+  name: z.string().min(2).max(100).optional(),
+  email: z.string().email().optional()
+});
+
+export type UpdateUserRequest = z.infer<typeof updateUserSchema>;
+
+// packages/shared-types/src/responses/api-responses.ts
+import { z } from 'zod';
+import { userSchema } from '../models/user';
+
+export const apiResponseSchema = <T extends z.ZodType>(dataSchema: T) => 
+  z.object({
+    data: dataSchema,
+    meta: z.object({
+      timestamp: z.string().datetime()
+    }).optional()
+  });
+
+export type ApiResponse<T> = {
+  data: T;
+  meta?: {
+    timestamp: string;
+  };
+};
+
+export const apiErrorSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+  details: z.unknown().optional()
+});
+
+export type ApiError = z.infer<typeof apiErrorSchema>;
+
+// packages/shared-types/src/index.ts
+export * from './models/user';
+export * from './requests/user-requests';
+export * from './responses/api-responses';
+```
+
+**フロントエンドでの使用例**:
+
+```typescript
+// apps/frontend/app/users/[id]/page.tsx
+import { User, userSchema } from 'shared-types';
+
+async function getUserById(id: string): Promise<User> {
+  const response = await fetch(`${process.env.API_URL}/users/${id}`);
+  
+  if (!response.ok) {
+    throw new Error('Failed to fetch user');
+  }
+  
+  const data = await response.json();
+  // 型の安全性確保のためにZodでバリデーション
+  return userSchema.parse(data);
+}
+
+export default async function UserPage({ params }: { params: { id: string } }) {
+  const user = await getUserById(params.id);
+  
+  return (
+    <div>
+      <h1>{user.name}</h1>
+      <p>Email: {user.email}</p>
+      <p>Created: {new Date(user.createdAt).toLocaleDateString()}</p>
+    </div>
+  );
+}
+```
+
+**バックエンドでの使用例（Node.js + Hono）**:
+
+```typescript
+// apps/backend/src/routes/users.ts
+import { Hono } from 'hono';
+import { zValidator } from '@hono/zod-validator';
+import { 
+  userSchema, 
+  createUserSchema, 
+  updateUserSchema,
+  ApiResponse,
+  CreateUserRequest,
+  UpdateUserRequest,
+  User
+} from 'shared-types';
+import { userService } from '../services/user-service';
+
+const userRoutes = new Hono();
+
+// ユーザー取得
+userRoutes.get('/:id', async (c) => {
+  const id = c.req.param('id');
+  const user = await userService.getUserById(id);
+  
+  if (!user) {
+    return c.json({ 
+      code: 'USER_NOT_FOUND', 
+      message: 'User not found' 
+    }, 404);
+  }
+  
+  // 返却前にスキーマ検証
+  const validatedUser = userSchema.parse(user);
+  
+  const response: ApiResponse<User> = {
+    data: validatedUser,
+    meta: {
+      timestamp: new Date().toISOString()
+    }
+  };
+  
+  return c.json(response);
+});
+
+// ユーザー作成
+userRoutes.post(
+  '/',
+  zValidator('json', createUserSchema),
+  async (c) => {
+    const data = c.req.valid('json') as CreateUserRequest;
+    const newUser = await userService.createUser(data);
+    
+    // 作成されたユーザーを検証
+    const validatedUser = userSchema.parse(newUser);
+    
+    return c.json({
+      data: validatedUser,
+      meta: {
+        timestamp: new Date().toISOString()
+      }
+    }, 201);
+  }
+);
+
+export { userRoutes };
+```
+
+### 2. ファイル同期アプローチ
+
+共有パッケージの設定が難しい場合に使用する、ファイル同期による方法：
+
+```typescript
+// 同期スクリプトの例（プロジェクトルートに配置）
+// sync-types.js
+const fs = require('fs');
+const path = require('path');
+
+// 同期元のディレクトリ
+const SOURCE_DIR = path.join(__dirname, 'backend/src/types');
+// 同期先のディレクトリ
+const TARGET_DIR = path.join(__dirname, 'frontend/src/types/api');
+
+// 同期先ディレクトリが存在しない場合は作成
+if (!fs.existsSync(TARGET_DIR)) {
+  fs.mkdirSync(TARGET_DIR, { recursive: true });
+}
+
+// 同期元ディレクトリ内のファイルを読み取り
+const files = fs.readdirSync(SOURCE_DIR);
+
+// TypeScriptファイルのみを同期
+const tsFiles = files.filter(file => file.endsWith('.ts'));
+
+// 各ファイルをコピー
+for (const file of tsFiles) {
+  const sourcePath = path.join(SOURCE_DIR, file);
+  const targetPath = path.join(TARGET_DIR, file);
+  
+  // ファイルの内容を読み取り
+  const content = fs.readFileSync(sourcePath, 'utf8');
+  
+  // 内容を書き込み
+  fs.writeFileSync(targetPath, content);
+  
+  console.log(`Synchronized ${file}`);
+}
+
+console.log('Type synchronization completed!');
+```
+
+このスクリプトをpackage.jsonのスクリプトとして登録：
+
+```json
+{
+  "scripts": {
+    "sync-types": "node sync-types.js"
+  }
+}
+```
+
+## TypeScript と Golang の型共有
+
+TypeScriptとGolangの間では直接的な型共有ができないため、手動で一貫性を確保する必要があります。
+
+### 1. コメントによる相互参照
+
+```typescript
+// frontend/src/types/api.ts
+/**
+ * User型定義
+ * @backend backend/internal/models/user.go:User
+ */
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  created_at: string; // ISO 8601 format
+}
+
+/**
+ * CreateUserRequest型定義
+ * @backend backend/internal/models/user.go:CreateUserRequest
+ */
+export interface CreateUserRequest {
+  name: string;
+  email: string;
+  password: string;
+}
+```
+
+対応するGolang型：
+
+```go
+// backend/internal/models/user.go
+
+// User represents a user in the system
+// @frontend frontend/src/types/api.ts:User
+type User struct {
+    ID        string    `json:"id"`
+    Name      string    `json:"name"`
+    Email     string    `json:"email"`
+    CreatedAt time.Time `json:"created_at"` // Will be serialized to ISO 8601 format
+}
+
+// CreateUserRequest represents the request body for creating a user
+// @frontend frontend/src/types/api.ts:CreateUserRequest
+type CreateUserRequest struct {
+    Name     string `json:"name"`
+    Email    string `json:"email"`
+    Password string `json:"password"`
+}
+```
+
+### 2. OpenAPI スキーマによる型生成
+
+OpenAPIを使ってAPI仕様を定義し、それを元にTypeScriptとGolangの型を生成する方法：
+
+1. OpenAPI スキーマを作成：
+
+```yaml
+# api/openapi.yaml
+openapi: 3.0.0
+info:
+  title: User API
+  version: 1.0.0
+paths:
+  /users:
+    get:
+      summary: Get all users
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+    post:
+      summary: Create a new user
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+components:
+  schemas:
+    User:
+      type: object
+      required:
+        - id
+        - name
+        - email
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 2
+        email:
+          type: string
+          format: email
+        created_at:
+          type: string
+          format: date-time
+    CreateUserRequest:
+      type: object
+      required:
+        - name
+        - email
+        - password
+      properties:
+        name:
+          type: string
+          minLength: 2
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+```
+
+2. TypeScript型の生成:
+
+```bash
+# openapi-typescript openapi.yaml -o frontend/src/types/api.ts
+```
+
+3. Golang型の生成:
+
+```bash
+# oapi-codegen -package api -generate types openapi.yaml > backend/internal/api/types.go
+```
+
+## フルスタック開発での型安全性を高めるテクニック
+
+### 1. APIレスポンスの構造化
+
+```typescript
+// 共通のレスポンス構造
+export interface ApiResponse<T> {
+  data: T;
+  meta?: {
+    timestamp: string;
+    pagination?: {
+      total: number;
+      page: number;
+      per_page: number;
+      total_pages: number;
+    };
+  };
+}
+
+export interface ApiError {
+  code: string;       // エラーコード
+  message: string;    // ユーザー向けメッセージ
+  details?: unknown;  // 追加情報
+}
+```
+
+Goでの対応する構造体：
+
+```go
+// APIResponse is a generic response wrapper
+type APIResponse struct {
+    Data  interface{} `json:"data"`
+    Meta  *Meta       `json:"meta,omitempty"`
+}
+
+type Meta struct {
+    Timestamp  string      `json:"timestamp"`
+    Pagination *Pagination `json:"pagination,omitempty"`
+}
+
+type Pagination struct {
+    Total      int `json:"total"`
+    Page       int `json:"page"`
+    PerPage    int `json:"per_page"`
+    TotalPages int `json:"total_pages"`
+}
+
+// APIError represents an error response
+type APIError struct {
+    Code    string      `json:"code"`
+    Message string      `json:"message"`
+    Details interface{} `json:"details,omitempty"`
+}
+```
+
+### 2. フロントエンドでの型安全なAPI呼び出し
+
+```typescript
+// frontend/lib/api.ts
+export async function apiRequest<TResponse, TRequest = undefined>(
+  endpoint: string,
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE' = 'GET',
+  data?: TRequest
+): Promise<ApiResponse<TResponse>> {
+  const options: RequestInit = {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    }
+  };
+
+  if (data) {
+    options.body = JSON.stringify(data);
+  }
+
+  const response = await fetch(`/api${endpoint}`, options);
+  const responseData = await response.json();
+
+  if (!response.ok) {
+    // エラーレスポンスの処理
+    const error = responseData as ApiError;
+    throw new Error(error.message || `API error: ${response.status}`);
+  }
+
+  return responseData as ApiResponse<TResponse>;
+}
+
+// 使用例
+import { User, CreateUserRequest } from '../types/api';
+
+export async function getUser(id: string): Promise<User> {
+  const response = await apiRequest<User>(`/users/${id}`);
+  return response.data;
+}
+
+export async function createUser(data: CreateUserRequest): Promise<User> {
+  const response = await apiRequest<User, CreateUserRequest>('/users', 'POST', data);
+  return response.data;
+}
+```
+
+### 3. 型安全な日付と時間の処理
+
+TypeScriptとGoの間で日付を安全に処理するためのアプローチ：
+
+```typescript
+// frontend/utils/date.ts
+export function formatDateForAPI(date: Date): string {
+  return date.toISOString(); // ISO 8601形式（2023-01-01T12:00:00.000Z）
+}
+
+export function parseAPIDate(dateString: string): Date {
+  return new Date(dateString);
+}
+```
+
+Golang側：
+
+```go
+// backend/internal/utils/date.go
+package utils
+
+import (
+    "time"
+)
+
+// FormatDateForAPI formats a time.Time to an ISO 8601 string
+func FormatDateForAPI(t time.Time) string {
+    return t.UTC().Format(time.RFC3339)
+}
+
+// ParseAPIDate parses an ISO 8601 string to a time.Time
+func ParseAPIDate(s string) (time.Time, error) {
+    return time.Parse(time.RFC3339, s)
+}
+```
+
+## 型の同期を保つための開発ワークフロー
+
+### 1. Pre-commitフック
+
+型定義の変更を検知し、自動的に同期するためのpre-commitフック：
+
+```bash
+#!/bin/sh
+# .git/hooks/pre-commit
+
+# 型定義ファイルが変更されたか確認
+if git diff --cached --name-only | grep -q "backend/src/types/"
+then
+  echo "Type definitions changed. Synchronizing..."
+  npm run sync-types
+  git add frontend/src/types/api/
+fi
+```
+
+### 2. CIプロセスでの型チェック
+
+CIパイプラインで型の整合性をチェックするスクリプト：
+
+```yaml
+# .github/workflows/type-check.yml
+name: Type Check
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      - name: Install dependencies
+        run: npm ci
+      - name: Validate API types
+        run: npm run validate-types
+```
+
+検証スクリプト（validate-types.js）：
+
+```javascript
+// scripts/validate-types.js
+const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
+
+// TypeScriptの型チェック
+console.log('Running TypeScript type check...');
+execSync('npx tsc --noEmit', { stdio: 'inherit' });
+
+// OpenAPI定義からの型生成と比較
+console.log('Validating API type consistency...');
+// 現在の型定義を一時ファイルにバックアップ
+fs.copyFileSync(
+  path.join(__dirname, '../frontend/src/types/api.ts'),
+  path.join(__dirname, '../frontend/src/types/api.ts.bak')
+);
+
+// OpenAPIから新しい型を生成
+execSync('npx openapi-typescript api/openapi.yaml -o frontend/src/types/api.ts.new', 
+  { stdio: 'inherit' });
+
+// 差分を確認
+try {
+  execSync('diff -u frontend/src/types/api.ts.bak frontend/src/types/api.ts.new', 
+    { stdio: 'inherit' });
+  console.log('✅ API types are consistent!');
+} catch (error) {
+  console.error('❌ API types are inconsistent! Please update your type definitions.');
+  process.exit(1);
+} finally {
+  // 一時ファイルを削除
+  fs.unlinkSync(path.join(__dirname, '../frontend/src/types/api.ts.bak'));
+  fs.unlinkSync(path.join(__dirname, '../frontend/src/types/api.ts.new'));
+}
+```
+
+## コードを生成する際の注意点
+
+1. **プロジェクト構造の確認** - 型定義の場所と共有方法をプロジェクト構造に合わせる
+2. **バリデーションの二重化** - フロントエンドとバックエンドの両方でデータ検証を実装
+3. **明示的な型変換** - 特に日付、数値、列挙型など、言語間で表現が異なるデータ型に注意
+4. **コメントで関連性を明示** - 型定義間の関連性をコメントで明示し、保守性を高める
+5. **自動生成ツールの活用** - 可能な限り自動生成ツールを使用し、人的ミスを減らす
+
+この文書で指定されていない側面については、各言語の標準的なベストプラクティスに従ってください。

@@ -1,0 +1,447 @@
+# Next.js + Golang フルスタック連携ルール
+
+あなたは、Next.jsとGolangを使用したフルスタックアプリケーション開発をサポートするAIアシスタントです。以下のルールに従って、一貫性のあるコードを生成してください。
+
+## プロジェクト理解
+
+このプロジェクトは以下の構造を持つフルスタックアプリケーションです：
+
+```
+/
+├── frontend/                # Next.js フロントエンド
+│   ├── app/                 # App Router構造
+│   ├── components/          # UIコンポーネント
+│   ├── lib/                 # ユーティリティと共有ロジック
+│   └── types/               # TypeScript型定義（バックエンドと共有）
+│       └── api.ts           # API型定義
+│
+├── backend/                 # Golang バックエンド
+    ├── cmd/                 # メインエントリポイント
+    ├── internal/            # 内部パッケージ
+    │   ├── api/             # APIハンドラー
+    │   ├── models/          # データモデル
+    │   └── services/        # ビジネスロジック
+    └── pkg/                 # 共有パッケージ
+```
+
+## 技術スタック
+
+- **フロントエンド**: Next.js 14+, TypeScript, React Server Components
+- **バックエンド**: Go 1.22+, RESTful API
+- **データの型共有**: TypeScriptインターフェース（フロントエンド）、Golang構造体（バックエンド）
+
+## フロントエンド開発ガイドライン
+
+### 1. Next.js アーキテクチャ
+
+- **App Router**を使用し、適切にページとコンポーネントを構造化する
+- **Server Components**と**Client Components**を適切に区別する
+  ```typescript
+  // ServerComponent（デフォルト）
+  export default function ProductList() {
+    // サーバー側でのデータ取得
+    // ...
+  }
+
+  // ClientComponent
+  'use client';
+  export default function InteractiveForm() {
+    // クライアント側の状態管理
+    // ...
+  }
+  ```
+- データフェッチには**Server Components**または**Server Actions**を優先する
+
+### 2. 型システム
+
+- **厳格なTypeScript設定**を使用する（strict: true）
+- **Zod**を使用してAPIレスポンスの型検証を行う
+  ```typescript
+  // frontend/types/api.ts
+  import { z } from 'zod';
+
+  export const userSchema = z.object({
+    id: z.string().uuid(),
+    name: z.string().min(1),
+    email: z.string().email(),
+    createdAt: z.string().datetime()
+  });
+
+  export type User = z.infer<typeof userSchema>;
+  ```
+- **unknown型**を使用してAPIレスポンスを受け取り、適切に型検証する
+  ```typescript
+  // 良い例
+  const data = await response.json();
+  const user = userSchema.parse(data);
+
+  // 悪い例
+  const user = await response.json() as User;
+  ```
+
+### 3. APIクライアント
+
+- 型付きAPIクライアントを使用してバックエンドと通信する
+  ```typescript
+  // frontend/lib/api.ts
+  import { User, userSchema } from '../types/api';
+
+  async function fetchWithValidation<T, S extends z.ZodType<T>>(
+    url: string,
+    schema: S,
+    options?: RequestInit
+  ): Promise<T> {
+    const response = await fetch(url, options);
+    
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.message || `API error: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    return schema.parse(data);
+  }
+
+  export async function getUser(id: string): Promise<User> {
+    return fetchWithValidation(`/api/users/${id}`, userSchema);
+  }
+  ```
+
+### 4. エラーハンドリング
+
+- 一貫したエラーハンドリングアプローチを使用する
+  ```typescript
+  // frontend/lib/errors.ts
+  export interface ApiError {
+    code: string;
+    message: string;
+    details?: unknown;
+  }
+
+  export class AppError extends Error {
+    constructor(
+      public readonly code: string,
+      message: string,
+      public readonly details?: unknown
+    ) {
+      super(message);
+      this.name = 'AppError';
+    }
+
+    static fromApiError(apiError: ApiError): AppError {
+      return new AppError(apiError.code, apiError.message, apiError.details);
+    }
+  }
+  ```
+
+## バックエンド開発ガイドライン
+
+### 1. Golang APIアーキテクチャ
+
+- **依存性注入**パターンを使用してサービスとハンドラーを構成する
+  ```go
+  // internal/api/handlers.go
+  type UserHandler struct {
+      service UserService
+  }
+
+  func NewUserHandler(service UserService) *UserHandler {
+      return &UserHandler{service: service}
+  }
+
+  func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
+      // ハンドラー実装
+  }
+  ```
+
+- **レイヤー分離**を明確にする（ハンドラー -> サービス -> リポジトリ）
+  ```go
+  // internal/services/user.go
+  type UserService interface {
+      GetUser(ctx context.Context, id string) (*models.User, error)
+  }
+
+  type userService struct {
+      repo UserRepository
+  }
+
+  func NewUserService(repo UserRepository) UserService {
+      return &userService{repo: repo}
+  }
+
+  func (s *userService) GetUser(ctx context.Context, id string) (*models.User, error) {
+      // サービス実装
+  }
+  ```
+
+### 2. 構造体とJSON
+
+- フロントエンドの型定義と一致する構造体を定義する
+  ```go
+  // internal/models/user.go
+  type User struct {
+      ID        string    `json:"id"`
+      Name      string    `json:"name"`
+      Email     string    `json:"email"`
+      CreatedAt time.Time `json:"createdAt"`
+  }
+  ```
+
+- 一貫したバリデーションを実装する
+  ```go
+  // internal/models/validation.go
+  func ValidateUser(u *User) error {
+      if u.ID == "" {
+          return errors.New("id is required")
+      }
+      if u.Name == "" {
+          return errors.New("name is required")
+      }
+      if !isValidEmail(u.Email) {
+          return errors.New("invalid email format")
+      }
+      return nil
+  }
+  ```
+
+### 3. エラーハンドリング
+
+- 構造化されたAPIエラーを定義する
+  ```go
+  // internal/api/errors.go
+  type ErrorResponse struct {
+      Code    string      `json:"code"`
+      Message string      `json:"message"`
+      Details interface{} `json:"details,omitempty"`
+  }
+
+  func WriteError(w http.ResponseWriter, code string, message string, status int, details interface{}) {
+      resp := ErrorResponse{
+          Code:    code,
+          Message: message,
+          Details: details,
+      }
+      w.Header().Set("Content-Type", "application/json")
+      w.WriteHeader(status)
+      json.NewEncoder(w).Encode(resp)
+  }
+  ```
+
+- エラータイプに基づいて適切なHTTPステータスコードを返す
+  ```go
+  // internal/api/handlers.go
+  func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
+      id := chi.URLParam(r, "id")
+      user, err := h.service.GetUser(r.Context(), id)
+      
+      if err != nil {
+          if errors.Is(err, repository.ErrNotFound) {
+              WriteError(w, "USER_NOT_FOUND", "User not found", http.StatusNotFound, nil)
+              return
+          }
+          WriteError(w, "INTERNAL_ERROR", "Internal server error", http.StatusInternalServerError, nil)
+          return
+      }
+      
+      w.Header().Set("Content-Type", "application/json")
+      json.NewEncoder(w).Encode(user)
+  }
+  ```
+
+## フロントエンドとバックエンドの統合
+
+### 1. 型定義の同期
+
+- フロントエンドのTypeScript型とバックエンドのGo構造体を一致させる
+  ```typescript
+  // frontend/types/api.ts
+  export interface User {
+    id: string;
+    name: string;
+    email: string;
+    createdAt: string; // ISO 8601形式
+  }
+  ```
+
+  ```go
+  // backend/internal/models/user.go
+  // 対応するフロントエンド型: frontend/types/api.ts#User
+  type User struct {
+      ID        string    `json:"id"`
+      Name      string    `json:"name"` 
+      Email     string    `json:"email"`
+      CreatedAt time.Time `json:"createdAt"` // JSONではISO 8601文字列に変換される
+  }
+  ```
+
+### 2. APIエンドポイントの一貫性
+
+- RESTfulなエンドポイント設計を一貫して使用する
+  ```
+  GET    /api/users       - ユーザー一覧の取得
+  POST   /api/users       - 新規ユーザーの作成
+  GET    /api/users/:id   - 特定ユーザーの取得
+  PUT    /api/users/:id   - ユーザー情報の更新
+  DELETE /api/users/:id   - ユーザーの削除
+  ```
+
+- 一貫したクエリパラメータを使用する
+  ```
+  GET /api/users?page=1&limit=10&sort=name:asc
+  ```
+
+### 3. エラーハンドリングの統一
+
+- フロントエンドとバックエンドで同じエラー構造を使用する
+  ```typescript
+  // frontend/types/api.ts
+  export interface ApiError {
+    code: string;      // エラーコード (例: "USER_NOT_FOUND")
+    message: string;   // ユーザー向けメッセージ
+    details?: unknown; // 追加情報
+  }
+  ```
+
+  ```go
+  // backend/internal/api/errors.go
+  type ErrorResponse struct {
+      Code    string      `json:"code"`
+      Message string      `json:"message"`
+      Details interface{} `json:"details,omitempty"`
+  }
+  ```
+
+### 4. 日付と時刻の処理
+
+- バックエンドでは`time.Time`、フロントエンドではISO 8601文字列を使用する
+- Go構造体の`json`タグで自動変換を活用する
+  ```go
+  type Event struct {
+      StartTime time.Time `json:"startTime"` // JSONではISO 8601文字列に変換される
+      EndTime   time.Time `json:"endTime"`
+  }
+  ```
+
+### 5. 認証と認可
+
+- JWTを使用した一貫した認証フローを実装する
+  ```go
+  // backend/internal/auth/jwt.go
+  func GenerateToken(userID string) (string, error) {
+      // JWT生成ロジック
+  }
+  ```
+
+  ```typescript
+  // frontend/lib/auth.ts
+  export function getAuthToken(): string | null {
+    return localStorage.getItem('authToken');
+  }
+
+  export function setAuthToken(token: string): void {
+    localStorage.setItem('authToken', token);
+  }
+  ```
+
+## コーディングプラクティス
+
+### 1. 命名規則
+
+- **フロントエンド**
+  - コンポーネント: PascalCase (例: `UserProfile`)
+  - 関数とメソッド: camelCase (例: `getUserData`)
+  - 型とインターフェース: PascalCase (例: `UserData`)
+  - 変数: camelCase (例: `userData`)
+
+- **バックエンド**
+  - 構造体: PascalCase (例: `UserProfile`)
+  - メソッド: PascalCase (例: `GetUserData`)
+  - 変数: camelCase (例: `userData`)
+  - インターフェース: PascalCase (通常は動詞+名詞, 例: `UserService`)
+
+### 2. コメント
+
+- フロントエンドとバックエンドのコード間で相互参照を行う
+  ```go
+  // 対応するTypeScript型: frontend/types/api.ts#User
+  type User struct {
+      // フィールド定義...
+  }
+  ```
+
+  ```typescript
+  // 対応するGo構造体: backend/internal/models/user.go#User
+  export interface User {
+    // フィールド定義...
+  }
+  ```
+
+## テストプラクティス
+
+### 1. フロントエンドテスト
+
+- コンポーネントテストにはVitest + React Testing Libraryを使用
+- APIクライアントモックを適切に実装する
+
+### 2. バックエンドテスト
+
+- ユニットテストとインテグレーションテストを実装する
+- テーブル駆動テストを使用する
+  ```go
+  func TestValidateUser(t *testing.T) {
+      tests := []struct {
+          name    string
+          user    User
+          wantErr bool
+      }{
+          {
+              name:    "valid user",
+              user:    User{ID: "123", Name: "John", Email: "john@example.com"},
+              wantErr: false,
+          },
+          {
+              name:    "missing name",
+              user:    User{ID: "123", Email: "john@example.com"},
+              wantErr: true,
+          },
+          // その他のテストケース...
+      }
+      
+      for _, tt := range tests {
+          t.Run(tt.name, func(t *testing.T) {
+              err := ValidateUser(tt.user)
+              if (err != nil) != tt.wantErr {
+                  t.Errorf("ValidateUser() error = %v, wantErr %v", err, tt.wantErr)
+              }
+          })
+      }
+  }
+  ```
+
+### 3. エンドツーエンドテスト
+
+- Playwrightを使用したE2Eテストを実装する
+- テスト用のモックAPIサーバーを設定する
+
+## パフォーマンス考慮事項
+
+- フロントエンドでは**Suspense**と**Streaming**を使用して初期読み込みを最適化する
+- バックエンドではクエリパフォーマンスを最適化し、適切なインデックスを使用する
+- 共通の検証ロジックを抽出してコードの重複を減らす
+
+## セキュリティベストプラクティス
+
+- クロスサイトスクリプティング(XSS)対策としてNext.jsの組み込み保護を活用する
+- バックエンドではCSRF対策を実装する
+- 入力検証をフロントエンドとバックエンドの両方で実施する
+- 機密データは環境変数で管理し、コードにハードコーディングしない
+
+## コードを生成する際の注意点
+
+1. フロントエンドとバックエンドのコードを同時に生成する場合は、型の整合性に注意する
+2. Go構造体のJSONタグがTypeScriptインターフェースと一致していることを確認する
+3. エラーハンドリングは常に両方の環境で一貫して実装する
+4. 日付/時刻の変換に注意し、タイムゾーンの問題を考慮する
+5. APIエンドポイントは一貫した命名規則と構造に従う
+
+この文書で指定されていない側面については、各言語とフレームワークの標準的なベストプラクティスに従ってください。

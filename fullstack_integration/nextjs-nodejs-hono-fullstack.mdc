@@ -1,0 +1,940 @@
+# Next.js + Node.js(Hono) フルスタック連携ルール
+
+あなたは、Next.jsとNode.js(Hono)を使用したフルスタックアプリケーション開発をサポートするAIアシスタントです。以下のルールに従って、一貫性のあるコードを生成してください。
+
+## プロジェクト理解
+
+このプロジェクトは以下の構造を持つフルスタックアプリケーションです：
+
+```
+/
+├── frontend/                   # Next.js フロントエンド
+│   ├── app/                    # App Router構造
+│   ├── components/             # UIコンポーネント
+│   ├── lib/                    # ユーティリティと共有ロジック
+│   ├── types/                  # TypeScript型定義（バックエンドと共有）
+│   │   └── api.ts              # API型定義
+│   └── tsconfig.json           # TypeScript設定
+│
+└── backend/                    # Node.js(Hono) バックエンド
+    ├── src/                    # ソースコード
+    │   ├── index.ts            # エントリポイント
+    │   ├── routes/             # APIルーティング
+    │   ├── controllers/        # リクエストハンドラー
+    │   ├── services/           # ビジネスロジック
+    │   ├── models/             # データモデル
+    │   └── types/              # TypeScript型定義（フロントエンドと共有可能）
+    └── tsconfig.json           # TypeScript設定
+```
+
+## 技術スタック
+
+- **フロントエンド**: Next.js 14+, TypeScript, React Server Components
+- **バックエンド**: Node.js, Hono, TypeScript
+- **データの型共有**: TypeScriptでの完全な型共有
+
+## フロントエンド開発ガイドライン
+
+### 1. Next.js アーキテクチャ
+
+- **App Router**を使用し、適切なフォルダ構造に従う
+- **Server Components**を基本とし、対話性が必要な部分に**Client Components**を使用する
+  ```typescript
+  // ServerComponent（デフォルト）
+  export default async function ProductList() {
+    // Server Componentでのデータ取得
+    const products = await getProducts();
+    return (
+      <div>
+        {products.map(product => (
+          <ProductCard key={product.id} product={product} />
+        ))}
+      </div>
+    );
+  }
+
+  // ClientComponent
+  'use client';
+  export default function AddToCartButton({ productId }: { productId: string }) {
+    // クライアント側の状態管理と対話処理
+    const [isLoading, setIsLoading] = useState(false);
+    
+    const handleAddToCart = async () => {
+      setIsLoading(true);
+      await addToCart(productId);
+      setIsLoading(false);
+    };
+    
+    return (
+      <button 
+        onClick={handleAddToCart} 
+        disabled={isLoading}
+      >
+        {isLoading ? 'Adding...' : 'Add to Cart'}
+      </button>
+    );
+  }
+  ```
+
+### 2. データフェッチング
+
+- **Server Components**でのデータフェッチには、組み込みの`fetch`を使用する
+  ```typescript
+  export default async function UserProfile({ userId }: { userId: string }) {
+    const user = await fetchUser(userId);
+    return <div>{user.name}</div>;
+  }
+
+  async function fetchUser(userId: string): Promise<User> {
+    const res = await fetch(`${process.env.API_URL}/users/${userId}`);
+    if (!res.ok) throw new Error('Failed to fetch user');
+    return await res.json();
+  }
+  ```
+
+- **Server Actions**を使用して、フォーム送信やデータ更新を処理する
+  ```typescript
+  'use server';
+  
+  export async function updateUser(formData: FormData) {
+    const userId = formData.get('userId') as string;
+    const name = formData.get('name') as string;
+    
+    // バリデーション
+    if (!name || name.length < 2) {
+      throw new Error('Name must be at least 2 characters');
+    }
+    
+    const response = await fetch(`${process.env.API_URL}/users/${userId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    });
+    
+    if (!response.ok) {
+      throw new Error('Failed to update user');
+    }
+    
+    return { success: true };
+  }
+  ```
+
+### 3. 型安全性
+
+- **zod**を使用してフォームデータやAPIレスポンスを検証する
+  ```typescript
+  import { z } from 'zod';
+  
+  const userSchema = z.object({
+    id: z.string().uuid(),
+    name: z.string().min(2),
+    email: z.string().email(),
+    createdAt: z.string().datetime()
+  });
+  
+  type User = z.infer<typeof userSchema>;
+  
+  async function fetchUserWithValidation(userId: string): Promise<User> {
+    const response = await fetch(`/api/users/${userId}`);
+    if (!response.ok) throw new Error('Failed to fetch user');
+    const data = await response.json();
+    return userSchema.parse(data);
+  }
+  ```
+
+## バックエンド開発ガイドライン（Node.js + Hono）
+
+### 1. Honoの基本構造
+
+- アプリケーションエントリポイントを明確に構造化する
+  ```typescript
+  // src/index.ts
+  import { Hono } from 'hono';
+  import { logger } from 'hono/logger';
+  import { prettyJSON } from 'hono/pretty-json';
+  import { userRoutes } from './routes/users';
+  
+  const app = new Hono();
+  
+  // ミドルウェア
+  app.use('*', logger());
+  app.use('*', prettyJSON());
+  
+  // ルート
+  app.route('/api/users', userRoutes);
+  
+  // 404ハンドラー
+  app.notFound((c) => {
+    return c.json({ error: 'Not found' }, 404);
+  });
+  
+  export default app;
+  ```
+
+- モジュール化されたルート設計を使用する
+  ```typescript
+  // src/routes/users.ts
+  import { Hono } from 'hono';
+  import { userController } from '../controllers/user-controller';
+  import { authMiddleware } from '../middlewares/auth';
+  
+  const userRoutes = new Hono();
+  
+  userRoutes.get('/', userController.getUsers);
+  userRoutes.get('/:id', userController.getUserById);
+  userRoutes.post('/', authMiddleware(), userController.createUser);
+  userRoutes.put('/:id', authMiddleware(), userController.updateUser);
+  userRoutes.delete('/:id', authMiddleware(), userController.deleteUser);
+  
+  export { userRoutes };
+  ```
+
+### 2. コントローラーの実装
+
+- **zod**を使用したリクエストバリデーションを統合する
+  ```typescript
+  // src/controllers/user-controller.ts
+  import { Context } from 'hono';
+  import { zValidator } from '@hono/zod-validator';
+  import { z } from 'zod';
+  import { userService } from '../services/user-service';
+  
+  const createUserSchema = z.object({
+    name: z.string().min(2),
+    email: z.string().email(),
+    password: z.string().min(8)
+  });
+  
+  export const userController = {
+    // ユーザー一覧の取得
+    getUsers: async (c: Context) => {
+      const users = await userService.getUsers();
+      return c.json(users);
+    },
+    
+    // ユーザー作成（バリデーション付き）
+    createUser: [
+      zValidator('json', createUserSchema),
+      async (c: Context) => {
+        const data = c.req.valid('json');
+        const user = await userService.createUser(data);
+        return c.json(user, 201);
+      }
+    ],
+    
+    // 他のコントローラー関数...
+  };
+  ```
+
+### 3. エラーハンドリング
+
+- 構造化されたエラーレスポンスを定義する
+  ```typescript
+  // src/utils/errors.ts
+  export class AppError extends Error {
+    constructor(
+      public readonly code: string,
+      message: string,
+      public readonly statusCode: number = 400,
+      public readonly details?: unknown
+    ) {
+      super(message);
+      this.name = 'AppError';
+    }
+    
+    toResponse() {
+      return {
+        code: this.code,
+        message: this.message,
+        details: this.details
+      };
+    }
+  }
+  
+  // 特定のエラータイプ
+  export class NotFoundError extends AppError {
+    constructor(message: string, details?: unknown) {
+      super('NOT_FOUND', message, 404, details);
+    }
+  }
+  
+  export class ValidationError extends AppError {
+    constructor(message: string, details?: unknown) {
+      super('VALIDATION_ERROR', message, 400, details);
+    }
+  }
+  ```
+
+- エラーハンドリングミドルウェアを実装する
+  ```typescript
+  // src/middlewares/error-handler.ts
+  import { Context, Next } from 'hono';
+  import { AppError } from '../utils/errors';
+  
+  export async function errorHandler(c: Context, next: Next) {
+    try {
+      await next();
+    } catch (error) {
+      console.error('Error:', error);
+      
+      if (error instanceof AppError) {
+        return c.json(error.toResponse(), error.statusCode);
+      }
+      
+      // 未処理のエラー
+      return c.json({
+        code: 'INTERNAL_ERROR',
+        message: 'Internal server error'
+      }, 500);
+    }
+  }
+  ```
+
+## フルスタック連携のポイント
+
+### 1. 型の共有
+
+Node.jsとNext.jsはどちらもTypeScriptを使用するため、型定義を直接共有することが可能です：
+
+#### 方法1: モノレポでの型共有
+
+```
+/
+├── packages/
+│   └── shared/              # 共有パッケージ
+│       ├── src/
+│       │   └── types/
+│       │       └── api.ts   # 共有型定義
+│       └── package.json
+├── apps/
+│   ├── frontend/            # Next.jsアプリ
+│   └── backend/             # Honoバックエンド
+└── package.json             # ワークスペース設定
+```
+
+#### 方法2: プロジェクト間での型ファイルのコピー
+
+型定義のみのコピーとして各プロジェクトに同期する方法（スクリプトを使用）：
+
+```typescript
+// shared-types.ts
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  createdAt: string;
+}
+
+export interface ApiError {
+  code: string;
+  message: string;
+  details?: unknown;
+}
+```
+
+### 2. API契約の一貫性
+
+Honoの型安全なAPIルーティングを活用：
+
+```typescript
+// backend/src/routes/users.ts
+import { Hono } from 'hono';
+import { z } from 'zod';
+import { zValidator } from '@hono/zod-validator';
+import { userController } from '../controllers/user-controller';
+
+// 型定義
+const userSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().min(2),
+  email: z.string().email(),
+  createdAt: z.string().datetime()
+});
+
+type User = z.infer<typeof userSchema>;
+
+const createUserSchema = z.object({
+  name: z.string().min(2),
+  email: z.string().email(),
+  password: z.string().min(8)
+});
+
+type CreateUserRequest = z.infer<typeof createUserSchema>;
+
+// ルーター
+const userRoutes = new Hono<{
+  Variables: {
+    user: User;
+  }
+}>();
+
+// ユーザー作成
+userRoutes.post('/', zValidator('json', createUserSchema), async (c) => {
+  const data = c.req.valid('json');
+  const user = await userService.createUser(data);
+  return c.json(user, 201);
+});
+
+// ユーザー取得
+userRoutes.get('/:id', async (c) => {
+  const id = c.req.param('id');
+  const user = await userService.getUserById(id);
+  
+  if (!user) {
+    return c.json({ code: 'USER_NOT_FOUND', message: 'User not found' }, 404);
+  }
+  
+  return c.json(user);
+});
+
+export { userRoutes };
+```
+
+### 3. APIクライアントの実装
+
+フロントエンドでの型安全なAPIクライアント：
+
+```typescript
+// frontend/lib/api-client.ts
+import { z } from 'zod';
+
+export class ApiClient {
+  private baseUrl: string;
+  
+  constructor(baseUrl: string) {
+    this.baseUrl = baseUrl;
+  }
+  
+  async get<T>(path: string, schema: z.ZodType<T>): Promise<T> {
+    const response = await fetch(`${this.baseUrl}${path}`);
+    
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.message || `API error: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    return schema.parse(data);
+  }
+  
+  async post<T, R>(
+    path: string, 
+    body: T,
+    schema: z.ZodType<R>
+  ): Promise<R> {
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+    
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.message || `API error: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    return schema.parse(data);
+  }
+  
+  // その他のHTTPメソッド（PUT, DELETE, PATCH）も同様に実装...
+}
+
+// 使用例
+import { userSchema, createUserSchema } from '../types/api';
+import type { User, CreateUserRequest } from '../types/api';
+
+const apiClient = new ApiClient(process.env.NEXT_PUBLIC_API_URL || '/api');
+
+export async function getUser(id: string): Promise<User> {
+  return apiClient.get(`/users/${id}`, userSchema);
+}
+
+export async function createUser(data: CreateUserRequest): Promise<User> {
+  return apiClient.post('/users', data, userSchema);
+}
+```
+
+### 4. Next.jsのAPI Routes (Route Handlers)
+
+Next.jsのRoute Handlersを使ってバックエンドAPIを呼び出すBFFパターン：
+
+```typescript
+// frontend/app/api/users/[id]/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
+import { userSchema } from '@/types/api';
+import type { ApiError } from '@/types/api';
+
+export async function GET(
+  request: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const id = params.id;
+    const response = await fetch(`${process.env.API_URL}/users/${id}`);
+    
+    if (!response.ok) {
+      const error = await response.json() as ApiError;
+      return NextResponse.json(
+        { code: error.code, message: error.message },
+        { status: response.status }
+      );
+    }
+    
+    const data = await response.json();
+    // バックエンドデータの検証
+    const user = userSchema.parse(data);
+    
+    // 必要に応じてデータを変換
+    return NextResponse.json(user);
+  } catch (error) {
+    console.error('Error fetching user:', error);
+    return NextResponse.json(
+      { code: 'INTERNAL_ERROR', message: 'Internal server error' },
+      { status: 500 }
+    );
+  }
+}
+```
+
+## 型安全性の強化
+
+### 1. API型生成の自動化
+
+Zod スキーマから型を自動生成することで、バリデーションと型を統一：
+
+```typescript
+// shared/schemas.ts
+import { z } from 'zod';
+
+export const userSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().min(2),
+  email: z.string().email(),
+  createdAt: z.string().datetime()
+});
+
+export type User = z.infer<typeof userSchema>;
+
+export const createUserSchema = z.object({
+  name: z.string().min(2),
+  email: z.string().email(),
+  password: z.string().min(8)
+});
+
+export type CreateUserRequest = z.infer<typeof createUserSchema>;
+
+export const updateUserSchema = z.object({
+  name: z.string().min(2).optional(),
+  email: z.string().email().optional()
+});
+
+export type UpdateUserRequest = z.infer<typeof updateUserSchema>;
+```
+
+### 2. 型安全なAPIエンドポイント定義
+
+Honoの型安全機能を活用した明示的なエンドポイント定義：
+
+```typescript
+// backend/src/api-types.ts
+import { z } from 'zod';
+import { userSchema, createUserSchema, updateUserSchema } from './schemas';
+
+// APIエンドポイント定義
+export const apiEndpoints = {
+  getUsers: {
+    path: '/api/users',
+    method: 'GET',
+    response: z.array(userSchema)
+  },
+  getUser: {
+    path: '/api/users/:id',
+    method: 'GET',
+    params: z.object({
+      id: z.string().uuid()
+    }),
+    response: userSchema
+  },
+  createUser: {
+    path: '/api/users',
+    method: 'POST',
+    body: createUserSchema,
+    response: userSchema
+  },
+  updateUser: {
+    path: '/api/users/:id',
+    method: 'PUT',
+    params: z.object({
+      id: z.string().uuid()
+    }),
+    body: updateUserSchema,
+    response: userSchema
+  },
+  deleteUser: {
+    path: '/api/users/:id',
+    method: 'DELETE',
+    params: z.object({
+      id: z.string().uuid()
+    }),
+    response: z.object({
+      success: z.boolean()
+    })
+  }
+};
+
+// 型定義
+export type ApiEndpoints = typeof apiEndpoints;
+```
+
+## エラー処理の統一
+
+フロントエンドとバックエンドで一貫したエラー処理：
+
+```typescript
+// shared/errors.ts
+export interface ApiError {
+  code: string;
+  message: string;
+  details?: unknown;
+}
+
+export const errorCodes = {
+  NOT_FOUND: 'NOT_FOUND',
+  VALIDATION_ERROR: 'VALIDATION_ERROR',
+  UNAUTHORIZED: 'UNAUTHORIZED',
+  FORBIDDEN: 'FORBIDDEN',
+  INTERNAL_ERROR: 'INTERNAL_ERROR'
+} as const;
+
+export type ErrorCode = keyof typeof errorCodes;
+```
+
+フロントエンドでのエラーハンドリング：
+
+```typescript
+// frontend/lib/error-handling.ts
+import { ApiError, errorCodes } from '@/types/errors';
+
+export function handleApiError(error: unknown): ApiError {
+  // APIエラーレスポンスのパース
+  if (error instanceof Response) {
+    try {
+      const data = await error.json();
+      if (data.code && data.message) {
+        return data as ApiError;
+      }
+    } catch (e) {
+      // JSONパースエラー
+    }
+    
+    return {
+      code: errorCodes.INTERNAL_ERROR,
+      message: `API error: ${error.status} ${error.statusText}`
+    };
+  }
+  
+  // 既知のエラー型
+  if (error instanceof Error) {
+    return {
+      code: errorCodes.INTERNAL_ERROR,
+      message: error.message
+    };
+  }
+  
+  // その他のエラー
+  return {
+    code: errorCodes.INTERNAL_ERROR,
+    message: 'An unknown error occurred'
+  };
+}
+
+// ユーザー向けエラーメッセージの生成
+export function getUserFriendlyErrorMessage(error: ApiError): string {
+  switch (error.code) {
+    case errorCodes.NOT_FOUND:
+      return 'The requested resource was not found.';
+    case errorCodes.VALIDATION_ERROR:
+      return 'Please check your input and try again.';
+    case errorCodes.UNAUTHORIZED:
+      return 'You need to log in to access this feature.';
+    case errorCodes.FORBIDDEN:
+      return 'You do not have permission to perform this action.';
+    default:
+      return 'Something went wrong. Please try again later.';
+  }
+}
+```
+
+## 認証と認可
+
+JWT認証の一貫した実装：
+
+```typescript
+// backend/src/middlewares/auth.ts
+import { Context, Next } from 'hono';
+import { verify } from 'hono/jwt';
+import { AppError } from '../utils/errors';
+
+export interface JwtPayload {
+  sub: string;  // ユーザーID
+  role: string; // ユーザーロール
+  exp: number;  // 有効期限
+}
+
+export async function authMiddleware() {
+  return async (c: Context, next: Next) => {
+    const authHeader = c.req.header('Authorization');
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new AppError(
+        'UNAUTHORIZED',
+        'Authentication required',
+        401
+      );
+    }
+    
+    const token = authHeader.split(' ')[1];
+    
+    try {
+      const payload = await verify(token, process.env.JWT_SECRET || '') as JwtPayload;
+      c.set('user', payload);
+      await next();
+    } catch (error) {
+      throw new AppError(
+        'UNAUTHORIZED',
+        'Invalid or expired token',
+        401
+      );
+    }
+  };
+}
+
+// ロールベースのアクセス制御
+export function roleMiddleware(allowedRoles: string[]) {
+  return async (c: Context, next: Next) => {
+    const user = c.get('user') as JwtPayload | undefined;
+    
+    if (!user) {
+      throw new AppError(
+        'UNAUTHORIZED',
+        'Authentication required',
+        401
+      );
+    }
+    
+    if (!allowedRoles.includes(user.role)) {
+      throw new AppError(
+        'FORBIDDEN',
+        'Insufficient permissions',
+        403
+      );
+    }
+    
+    await next();
+  };
+}
+```
+
+フロントエンドでの認証処理：
+
+```typescript
+// frontend/lib/auth.ts
+import { jwtDecode } from 'jwt-decode';
+import { JwtPayload } from '@/types/auth';
+
+export function getAuthToken(): string | null {
+  return localStorage.getItem('authToken');
+}
+
+export function setAuthToken(token: string): void {
+  localStorage.setItem('authToken', token);
+}
+
+export function clearAuthToken(): void {
+  localStorage.removeItem('authToken');
+}
+
+export function getUser(): JwtPayload | null {
+  const token = getAuthToken();
+  if (!token) return null;
+  
+  try {
+    return jwtDecode<JwtPayload>(token);
+  } catch (error) {
+    console.error('Invalid token:', error);
+    clearAuthToken();
+    return null;
+  }
+}
+
+export function isAuthenticated(): boolean {
+  const user = getUser();
+  if (!user) return false;
+  
+  // トークンの有効期限をチェック
+  const now = Date.now() / 1000;
+  return user.exp > now;
+}
+
+export function hasRole(role: string): boolean {
+  const user = getUser();
+  return user?.role === role;
+}
+```
+
+## パフォーマンス最適化
+
+### 1. サーバーサイドキャッシュ
+
+Honoでのキャッシュ実装：
+
+```typescript
+// backend/src/middlewares/cache.ts
+import { Context, Next } from 'hono';
+
+// シンプルなメモリキャッシュ
+const cache = new Map<string, { data: any; expires: number }>();
+
+export function cacheMiddleware(ttlSeconds = 60) {
+  return async (c: Context, next: Next) => {
+    // GETリクエストのみキャッシュ
+    if (c.req.method !== 'GET') {
+      await next();
+      return;
+    }
+    
+    const cacheKey = c.req.url;
+    const cachedResponse = cache.get(cacheKey);
+    
+    // キャッシュがあり、有効期限内
+    if (cachedResponse && cachedResponse.expires > Date.now()) {
+      return c.json(cachedResponse.data);
+    }
+    
+    // オリジナルのjsonメソッドを保存
+    const originalJson = c.json;
+    
+    // jsonメソッドをオーバーライド
+    c.json = (data: any, status?: number) => {
+      // 成功レスポンスのみキャッシュ
+      if (!status || status === 200) {
+        cache.set(cacheKey, {
+          data,
+          expires: Date.now() + ttlSeconds * 1000
+        });
+      }
+      return originalJson.call(c, data, status);
+    };
+    
+    await next();
+  };
+}
+
+// キャッシュクリアミドルウェア（特定のエンドポイントのキャッシュを削除）
+export function clearCacheMiddleware(pattern: RegExp) {
+  return async (c: Context, next: Next) => {
+    await next();
+    
+    // ステータスが成功の場合のみキャッシュクリア
+    if (c.res.status >= 200 && c.res.status < 300) {
+      for (const key of cache.keys()) {
+        if (pattern.test(key)) {
+          cache.delete(key);
+        }
+      }
+    }
+  };
+}
+```
+
+### 2. Next.jsでのデータフェッチング最適化
+
+```typescript
+// frontend/lib/fetch-utils.ts
+import 'server-only';
+
+// 特定の時間でキャッシュするfetchラッパー
+export async function fetchWithCache<T>(
+  url: string,
+  options?: RequestInit & { revalidate?: number }
+): Promise<T> {
+  const { revalidate, ...fetchOptions } = options || {};
+  
+  const response = await fetch(url, {
+    ...fetchOptions,
+    next: {
+      revalidate: revalidate // undefined = default cache behavior
+    }
+  });
+  
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+  
+  return await response.json();
+}
+
+// キャッシュを無効化するfetchラッパー
+export async function fetchWithNoCache<T>(
+  url: string,
+  options?: RequestInit
+): Promise<T> {
+  const response = await fetch(url, {
+    ...options,
+    cache: 'no-store'
+  });
+  
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+  
+  return await response.json();
+}
+```
+
+## コーディングプラクティス
+
+### 1. 命名規則
+
+- **関数とメソッド**: camelCase (`getUserData`, `createNewUser`)
+- **型とインターフェース**: PascalCase (`UserData`, `ApiResponse`)
+- **コンスタント**: UPPER_SNAKE_CASE (`API_BASE_URL`, `DEFAULT_TIMEOUT`)
+- **ファイル名**: kebab-case (`user-service.ts`, `auth-middleware.ts`)
+
+### 2. エクスポート規則
+
+- 1ファイルにつき1つの主要な関数・クラスを定義し、default exportを使用する
+- 複数の関数・定数を同一ファイルでエクスポートする場合は、named exportsを使用する
+- タイプとインターフェースのエクスポートには常にnamed exportsを使用する
+
+```typescript
+// 良い例
+// user-service.ts
+export class UserService {
+  // 実装...
+}
+
+// 良い例
+// api-types.ts
+export interface User {
+  // フィールド...
+}
+
+export interface CreateUserRequest {
+  // フィールド...
+}
+```
+
+### 3. Hono/Next.jsでのコードを生成する際の注意点
+
+1. 型の整合性を常に最優先する
+2. フロントエンドとバックエンドで一貫したエラー処理を実装する
+3. バリデーションはzodを使用して両方の環境で実装する
+4. RESTful APIのエンドポイント設計原則に従う
+5. 機密情報は環境変数で管理し、ハードコーディングしない
+
+この文書で指定されていない側面については、TypeScriptとNext.js/Honoの標準的なベストプラクティスに従ってください。
